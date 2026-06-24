@@ -430,7 +430,7 @@ function DeleteConfirm({ docId, onClose, onConfirm }) {
 const CLUSTER_PROVIDERS = [
   { id: 'anthropic', label: 'Claude',  placeholder: 'sk-ant-…',  model: 'claude-haiku-4-5-20251001' },
   { id: 'openai',    label: 'OpenAI',  placeholder: 'sk-…',      model: 'gpt-4o-mini' },
-  { id: 'gemini',    label: 'Gemini',  placeholder: 'AIza…',     model: 'gemini-2.0-flash' },
+  { id: 'gemini',    label: 'Gemini',  placeholder: 'AIza…',     model: 'gemini-2.5-flash' },
 ]
 
 const CLUSTER_PROMPT = (payload) =>
@@ -458,7 +458,7 @@ async function callClusterAPI(provider, apiKey, prompt) {
     return data.choices?.[0]?.message?.content || ''
   }
   if (provider === 'gemini') {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
@@ -484,7 +484,9 @@ function ClusterModal({ docs, onClose, onApply }) {
     try {
       const payload = docs.map(m => ({ id: m.__cb_key, text: getPrimaryText(m) || m.__cb_key })).filter(m => m.text)
       const raw = await callClusterAPI(provider, apiKey, CLUSTER_PROMPT(payload))
-      const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim())
+      const match = raw.match(/\{[\s\S]*\}/)
+      if (!match) throw new Error('No JSON returned by the model')
+      const parsed = JSON.parse(match[0])
       onApply(parsed.themes)
       onClose()
     } catch (e) {
