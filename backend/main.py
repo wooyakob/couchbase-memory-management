@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from routers import connect, memories
+from routers import connect, memories, cluster
 
 app = FastAPI(title="Couchbase Memory Management", version="1.0.0")
 
@@ -23,6 +23,7 @@ app.add_middleware(
 
 app.include_router(connect.router)
 app.include_router(memories.router)
+app.include_router(cluster.router)
 
 # Serve built frontend in production
 FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")

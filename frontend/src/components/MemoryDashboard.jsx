@@ -526,7 +526,7 @@ const CLUSTER_PROVIDERS = [
 const CLUSTER_PROMPT = (payload) =>
   `Cluster these memory documents into 3–7 concise themes (2-3 words each). Return ONLY valid JSON — no markdown: {"themes":{"Theme Name":["doc_id"],...}}\n\nDocuments: ${JSON.stringify(payload)}`
 
-async function callClusterAPI(provider, apiKey, prompt, endpoint) {
+async function callClusterAPI(provider, apiKey, prompt, endpoint, model) {
   if (provider === 'capella') {
     let base
     try {
@@ -534,40 +534,16 @@ async function callClusterAPI(provider, apiKey, prompt, endpoint) {
     } catch {
       throw new Error('Invalid endpoint URL. It should look like: https://your-model.ai.couchbase.com')
     }
-    let res
-    try {
-      res = await fetch(`${base}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-        body: JSON.stringify({ messages: [{ role: 'user', content: prompt }], max_tokens: 1024, stream: false }),
-      })
-    } catch (fetchErr) {
-      // fetch() throws TypeError when the network request fails entirely (CORS block, unreachable host, etc.)
-      if (fetchErr instanceof TypeError) {
-        throw new Error(
-          'Could not reach the Capella Model Service endpoint. ' +
-          'Check that the URL is correct and that the service allows browser requests (CORS). ' +
-          `Details: ${fetchErr.message}`
-        )
-      }
-      throw fetchErr
-    }
-    let data
-    try {
-      data = await res.json()
-    } catch {
-      throw new Error(`Capella Model Service returned a non-JSON response (HTTP ${res.status}). Check that the endpoint URL points to the model's completions path.`)
-    }
-    if (!res.ok) {
-      throw new Error(
-        data.error?.message ||
-        data.message ||
-        `Capella Model Service error (HTTP ${res.status}). Verify your API key and endpoint.`
-      )
-    }
-    const text = data.choices?.[0]?.message?.content
-    if (!text) throw new Error('Capella Model Service returned an empty response. The model may not have generated any content.')
-    return text
+    // Proxy through the backend to avoid CORS restrictions
+    const res = await fetch('/api/cluster', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint: base, api_key: apiKey, model: model || '', prompt }),
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.detail || `Capella Model Service error (HTTP ${res.status})`)
+    if (!data.text) throw new Error('Capella Model Service returned an empty response.')
+    return data.text
   }
   if (provider === 'anthropic') {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -606,6 +582,7 @@ function ClusterModal({ docs, onClose, onApply }) {
   const [provider, setProvider] = useState('capella')
   const [apiKey, setApiKey] = useState('')
   const [endpoint, setEndpoint] = useState('')
+  const [modelName, setModelName] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -616,12 +593,21 @@ function ClusterModal({ docs, onClose, onApply }) {
     setBusy(true)
     setError('')
     try {
-      const payload = docs.map(m => ({ id: m.__cb_key, text: getPrimaryText(m) || m.__cb_key })).filter(m => m.text)
-      const raw = await callClusterAPI(provider, apiKey, CLUSTER_PROMPT(payload), endpoint)
+      // Use numeric indices as IDs — models reliably reproduce small integers,
+      // unlike long UUIDs which get mangled. Map back to __cb_key after.
+      const eligible = docs.filter(m => getPrimaryText(m))
+      const indexToKey = eligible.map(m => m.__cb_key)
+      const payload = eligible.map((m, i) => ({ id: String(i), text: getPrimaryText(m) }))
+      const raw = await callClusterAPI(provider, apiKey, CLUSTER_PROMPT(payload), endpoint, modelName)
       const match = raw.match(/\{[\s\S]*\}/)
       if (!match) throw new Error('No JSON returned by the model')
       const parsed = JSON.parse(match[0])
-      onApply(parsed.themes)
+      // Translate numeric indices back to actual Couchbase document keys
+      const resolved = {}
+      Object.entries(parsed.themes || {}).forEach(([theme, ids]) => {
+        resolved[theme] = ids.map(id => indexToKey[Number(id)]).filter(Boolean)
+      })
+      onApply(resolved)
       onClose()
     } catch (e) {
       setError(e.message)
@@ -643,7 +629,7 @@ function ClusterModal({ docs, onClose, onApply }) {
           {CLUSTER_PROVIDERS.map(p => (
             <button
               key={p.id}
-              onClick={() => { setProvider(p.id); setApiKey(''); setEndpoint(''); setError('') }}
+              onClick={() => { setProvider(p.id); setApiKey(''); setEndpoint(''); setModelName(''); setError('') }}
               style={{
                 flex: '0 0 auto', padding: '6px 10px', borderRadius: '6px', border: 'none', fontSize: '12px', fontWeight: 500, cursor: 'pointer',
                 background: provider === p.id ? C.elevated : 'transparent',
@@ -670,23 +656,40 @@ function ClusterModal({ docs, onClose, onApply }) {
           </div>
         )}
 
-        {/* Capella endpoint field */}
+        {/* Capella endpoint + model fields */}
         {provider === 'capella' && (
-          <div style={{ marginBottom: '12px' }}>
-            <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: C.muted, marginBottom: '6px' }}>
-              Model Endpoint URL
-            </label>
-            <input
-              type="text"
-              value={endpoint}
-              onChange={e => setEndpoint(e.target.value)}
-              placeholder="https://your-model.ai.couchbase.com"
-              style={{ width: '100%', padding: '9px 12px', background: C.elevated, border: `1px solid ${C.border}`, borderRadius: '8px', color: C.text, fontSize: '13px', outline: 'none', fontFamily: mono, boxSizing: 'border-box' }}
-            />
-            <div style={{ fontFamily: mono, fontSize: '10px', color: C.faint, marginTop: '4px' }}>
-              From Capella AI &rsaquo; Model Service &rsaquo; your deployed model endpoint
+          <>
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: C.muted, marginBottom: '6px' }}>
+                Model Endpoint URL
+              </label>
+              <input
+                type="text"
+                value={endpoint}
+                onChange={e => setEndpoint(e.target.value)}
+                placeholder="https://your-model.ai.couchbase.com"
+                style={{ width: '100%', padding: '9px 12px', background: C.elevated, border: `1px solid ${C.border}`, borderRadius: '8px', color: C.text, fontSize: '13px', outline: 'none', fontFamily: mono, boxSizing: 'border-box' }}
+              />
+              <div style={{ fontFamily: mono, fontSize: '10px', color: C.faint, marginTop: '4px' }}>
+                From Capella AI &rsaquo; Model Service &rsaquo; your deployed model endpoint
+              </div>
             </div>
-          </div>
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: C.muted, marginBottom: '6px' }}>
+                Model Name
+              </label>
+              <input
+                type="text"
+                value={modelName}
+                onChange={e => setModelName(e.target.value)}
+                placeholder="mistralai/mistral-7b-instruct-v0.3"
+                style={{ width: '100%', padding: '9px 12px', background: C.elevated, border: `1px solid ${C.border}`, borderRadius: '8px', color: C.text, fontSize: '13px', outline: 'none', fontFamily: mono, boxSizing: 'border-box' }}
+              />
+              <div style={{ fontFamily: mono, fontSize: '10px', color: C.faint, marginTop: '4px' }}>
+                From Capella AI &rsaquo; Model Service &rsaquo; your deployed model name
+              </div>
+            </div>
+          </>
         )}
 
         <div style={{ marginBottom: '16px' }}>
