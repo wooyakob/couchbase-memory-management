@@ -156,6 +156,7 @@ function Sidebar({ total, filtered, groups, themes, activeFilter, timeRange, onF
   )
 
   const TIME_OPTS = [
+    { value: null, label: 'All' },
     { value: 'hour', label: '1h' },
     { value: 'day', label: '24h' },
     { value: 'week', label: '7d' },
@@ -182,14 +183,14 @@ function Sidebar({ total, filtered, groups, themes, activeFilter, timeRange, onF
       </div>
 
       {/* Time Range */}
-      <SectionHead label="Time Range" />
+      <SectionHead label="Time Window" />
       <div style={{ padding: '0 10px 8px', display: 'flex', gap: '4px' }}>
         {TIME_OPTS.map(({ value, label }) => {
           const active = timeRange === value
           return (
             <button
-              key={value}
-              onClick={() => onTimeRange(active ? null : value)}
+              key={label}
+              onClick={() => onTimeRange(value)}
               style={{
                 flex: 1, padding: '5px 0', borderRadius: '5px',
                 border: `1px solid ${active ? C.cbRed : C.border}`,
@@ -400,7 +401,12 @@ function DetailPanel({ doc, onClose, onDelete }) {
             {documentFields.map(([k, v]) => (
               <div key={k} style={{ marginBottom: '14px' }}>
                 <Label>{k}</Label>
-                {renderValue(v)}
+                {k === 'block_id' && typeof v === 'string' ? (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <div style={{ flex: 1 }}>{renderValue(v)}</div>
+                    <CopyBtn value={v} style={{ fontSize: '14px', padding: '4px 7px', flexShrink: 0 }} />
+                  </div>
+                ) : renderValue(v)}
               </div>
             ))}
             {documentFields.length === 0 && (
@@ -937,8 +943,8 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
               )}
               {timeRange && (
                 <div style={{ fontSize: '12px', color: C.faint, marginTop: '8px', maxWidth: '360px', lineHeight: 1.6 }}>
-                  Time range filter is active (<span style={{ color: C.yellow }}>{timeRange === 'hour' ? '1 hour' : timeRange === 'day' ? '24 hours' : '7 days'}</span>).
-                  This filters on the <span style={{ fontFamily: mono, color: C.muted }}>created_at</span> field — memories without that field are excluded.
+                  Showing last <span style={{ color: C.yellow }}>{timeRange === 'hour' ? '1 hour' : timeRange === 'day' ? '24 hours' : '7 days'}</span>.
+                  Filters on <span style={{ fontFamily: mono, color: C.muted }}>created_at</span> — memories without that field are excluded.
                 </div>
               )}
             </div>
