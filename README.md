@@ -147,6 +147,7 @@ Vite proxies `/api/*` → `localhost:8000` in development. In production (and Do
 ## Running tests
 
 ```bash
+
 # Install test dependencies
 backend/venv/bin/pip install pytest httpx
 

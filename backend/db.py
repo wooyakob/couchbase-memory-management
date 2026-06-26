@@ -102,31 +102,45 @@ class ConnectionManager:
         from datetime import datetime, timedelta, timezone
 
         path = self._col_path()
-        conditions: List[str] = []
         params: Dict[str, Any] = {"lim": limit, "off": offset}
 
-        if search:
-            # Exact match on document key OR substring match in document body
-            conditions.append("(META(m).id = $search_exact OR LOWER(TO_STRING(m)) LIKE $search_like)")
-            params["search_exact"] = search
-            params["search_like"] = f"%{search.lower()}%"
+        # Build the non-search filters (user, type, time). These always apply
+        # to regular browsing, and also scope the text LIKE search — but they
+        # must NOT block an explicit block ID / document key lookup.
+        scoped_conditions: List[str] = []
+
         if type_filter:
-            conditions.append("m.`type` = $type_filter")
+            scoped_conditions.append("m.`type` = $type_filter")
             params["type_filter"] = type_filter
         if user_filter:
-            conditions.append("m.user_id = $user_filter")
+            scoped_conditions.append("m.user_id = $user_filter")
             params["user_filter"] = user_filter
         if time_range:
             deltas = {"hour": timedelta(hours=1), "day": timedelta(days=1), "week": timedelta(weeks=1)}
             delta = deltas.get(time_range)
             if delta:
                 time_from = (datetime.now(timezone.utc) - delta).strftime("%Y-%m-%dT%H:%M:%SZ")
-                # Compares created_at as an ISO 8601 string. Documents missing created_at
-                # or storing it as a Unix integer will be excluded by this condition.
-                conditions.append("m.created_at IS NOT MISSING AND m.created_at >= $time_from")
+                # Compares created_at as ISO 8601 string; docs without created_at are excluded.
+                scoped_conditions.append("m.created_at IS NOT MISSING AND m.created_at >= $time_from")
                 params["time_from"] = time_from
 
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        if search:
+            params["search_exact"] = search
+            params["search_like"] = f"%{search.lower()}%"
+            # Exact match on the Couchbase document key OR the block_id field always
+            # wins regardless of user/type/time filters — a block ID uniquely identifies
+            # one memory and should always be findable by ID.
+            exact_clause = "(META(m).id = $search_exact OR m.block_id = $search_exact)"
+            if scoped_conditions:
+                scoped_clause = " AND ".join(scoped_conditions)
+                like_clause = f"(LOWER(TO_STRING(m)) LIKE $search_like AND {scoped_clause})"
+            else:
+                like_clause = "LOWER(TO_STRING(m)) LIKE $search_like"
+            where = f"WHERE {exact_clause} OR {like_clause}"
+        elif scoped_conditions:
+            where = f"WHERE {' AND '.join(scoped_conditions)}"
+        else:
+            where = ""
 
         count_q = f"SELECT COUNT(*) AS total FROM {path} AS m {where}"
         count_rows = list(self._cluster.query(count_q, QueryOptions(named_parameters=params)))
