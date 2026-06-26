@@ -27,19 +27,28 @@ def _is_index_error(e: Exception) -> bool:
     return any(phrase.lower() in msg.lower() for phrase in _INDEX_ERRORS)
 
 
+_VALID_TIME_RANGES = {"hour", "day", "week"}
+
+
 @router.get("")
 async def list_memories(
     search: Optional[str] = Query(None),
     type: Optional[str] = Query(None),
     user_id: Optional[str] = Query(None),
+    time_range: Optional[str] = Query(None),
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
 ):
     _ensure_ready()
+    if time_range is not None and time_range not in _VALID_TIME_RANGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid time_range '{time_range}'. Must be one of: hour, day, week.",
+        )
     try:
         result = await run_in_threadpool(
             connection_manager.query_documents,
-            search, type, user_id, limit, offset,
+            search, type, user_id, time_range, limit, offset,
         )
         return result
     except Exception as e:

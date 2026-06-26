@@ -60,6 +60,56 @@ function statusBadgeStyle(status) {
   }
 }
 
+// ─── COPY BUTTON ─────────────────────────────────────────────────────────────
+function CopyBtn({ value, style = {} }) {
+  const [copied, setCopied] = useState(false)
+  const handleCopy = (e) => {
+    e.stopPropagation()
+    const finish = () => { setCopied(true); setTimeout(() => setCopied(false), 1400) }
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(value).then(finish).catch(() => {
+        // Clipboard API unavailable (non-HTTPS or permission denied) — fall back to execCommand
+        try {
+          const el = document.createElement('textarea')
+          el.value = value
+          el.style.position = 'fixed'; el.style.opacity = '0'
+          document.body.appendChild(el); el.select()
+          document.execCommand('copy')
+          document.body.removeChild(el)
+          finish()
+        } catch { /* silently ignore if both methods fail */ }
+      })
+    } else {
+      try {
+        const el = document.createElement('textarea')
+        el.value = value
+        el.style.position = 'fixed'; el.style.opacity = '0'
+        document.body.appendChild(el); el.select()
+        document.execCommand('copy')
+        document.body.removeChild(el)
+        finish()
+      } catch { /* silently ignore */ }
+    }
+  }
+  return (
+    <button
+      title="Copy Block ID"
+      onClick={handleCopy}
+      style={{
+        background: 'none', border: 'none', cursor: 'pointer',
+        padding: '1px 5px', borderRadius: '4px',
+        color: copied ? C.green : C.faint,
+        fontSize: '11px', fontFamily: mono,
+        transition: 'color 0.15s',
+        flexShrink: 0,
+        ...style,
+      }}
+    >
+      {copied ? '✓' : '⧉'}
+    </button>
+  )
+}
+
 // ─── TOAST ───────────────────────────────────────────────────────────────────
 function Toast({ msg, type }) {
   return (
@@ -76,7 +126,7 @@ function Toast({ msg, type }) {
 }
 
 // ─── SIDEBAR ─────────────────────────────────────────────────────────────────
-function Sidebar({ total, filtered, groups, themes, activeFilter, onFilter, onSearch, onAutoCluster, clustering }) {
+function Sidebar({ total, filtered, groups, themes, activeFilter, timeRange, onFilter, onSearch, onTimeRange, onAutoCluster, clustering }) {
   const NavBtn = ({ id, label, count, color }) => {
     const active = activeFilter?.key === id || (!activeFilter && id === '__all__')
     return (
@@ -105,21 +155,52 @@ function Sidebar({ total, filtered, groups, themes, activeFilter, onFilter, onSe
     </div>
   )
 
+  const TIME_OPTS = [
+    { value: 'hour', label: '1h' },
+    { value: 'day', label: '24h' },
+    { value: 'week', label: '7d' },
+  ]
+
   return (
     <aside style={{ width: '220px', background: C.surface, borderRight: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', flexShrink: 0, overflowY: 'auto' }}>
-      <div style={{ padding: '12px 10px 8px' }}>
+      <div style={{ padding: '12px 10px 4px' }}>
         <div style={{ position: 'relative' }}>
           <span style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: C.faint, fontSize: '13px', pointerEvents: 'none' }}>⌕</span>
           <input
-            placeholder="Search…"
+            placeholder="Search or paste a Block ID…"
             style={{
               width: '100%', padding: '7px 10px 7px 28px',
               background: C.elevated, border: `1px solid ${C.border}`, borderRadius: '6px',
-              color: C.text, fontSize: '12.5px', outline: 'none',
+              color: C.text, fontSize: '12.5px', outline: 'none', boxSizing: 'border-box',
             }}
             onChange={e => onSearch(e.target.value)}
           />
         </div>
+        <div style={{ fontFamily: mono, fontSize: '10px', color: C.faint, marginTop: '5px', paddingLeft: '2px', lineHeight: 1.5 }}>
+          Paste a full Block ID for exact match
+        </div>
+      </div>
+
+      {/* Time Range */}
+      <SectionHead label="Time Range" />
+      <div style={{ padding: '0 10px 8px', display: 'flex', gap: '4px' }}>
+        {TIME_OPTS.map(({ value, label }) => {
+          const active = timeRange === value
+          return (
+            <button
+              key={value}
+              onClick={() => onTimeRange(active ? null : value)}
+              style={{
+                flex: 1, padding: '5px 0', borderRadius: '5px',
+                border: `1px solid ${active ? C.cbRed : C.border}`,
+                background: active ? 'rgba(234,35,40,0.1)' : C.elevated,
+                color: active ? C.cbRed : C.muted,
+                fontSize: '11px', cursor: 'pointer', fontFamily: mono,
+                transition: 'all 0.12s',
+              }}
+            >{label}</button>
+          )
+        })}
       </div>
 
       <NavBtn id="__all__" label="All memories" count={total} />
@@ -140,7 +221,7 @@ function Sidebar({ total, filtered, groups, themes, activeFilter, onFilter, onSe
 
       {Object.keys(themes).length > 0 && (
         <>
-          <SectionHead label="Themes (AI)" />
+          <SectionHead label="Groups (AI)" />
           {Object.entries(themes).map(([name, ids], i) => (
             <NavBtn key={name} id={`theme:${name}`} label={name} count={ids.length} color={THEME_COLORS[i % THEME_COLORS.length]} />
           ))}
@@ -158,7 +239,7 @@ function Sidebar({ total, filtered, groups, themes, activeFilter, onFilter, onSe
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
           }}
         >
-          <span>✦</span> {clustering ? 'Clustering…' : 'AI Auto-cluster'}
+          <span>✦</span> {clustering ? 'Grouping…' : 'Auto Group Memories'}
         </button>
         <div style={{ fontFamily: mono, fontSize: '10px', color: C.faint, marginTop: '8px', textAlign: 'center' }}>
           {filtered} shown of {total}
@@ -188,8 +269,11 @@ function MemoryCard({ doc, selected, theme, onSelect, onDelete }) {
     >
       {/* Top row */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px', gap: '8px' }}>
-        <span style={{ fontFamily: mono, fontSize: '11px', color: C.faint, flexShrink: 0 }}>{shortId(docId)}</span>
-        <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '2px', minWidth: 0 }}>
+          <span style={{ fontFamily: mono, fontSize: '11px', color: C.faint, whiteSpace: 'nowrap' }}>{shortId(docId)}</span>
+          <CopyBtn value={docId} />
+        </div>
+        <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap', justifyContent: 'flex-end', flexShrink: 0 }}>
           {doc.type && (
             <span style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '10px', background: `${typeColor(doc.type)}18`, color: typeColor(doc.type), border: `1px solid ${typeColor(doc.type)}30`, fontWeight: 500 }}>
               {doc.type}
@@ -283,23 +367,6 @@ function DetailPanel({ doc, onClose, onDelete }) {
     </div>
   )
 
-  const MetaRow = ({ label, value, mono: useMono, color }) => (
-    <div style={{ marginBottom: '14px' }}>
-      <Label>{label}</Label>
-      <div style={{
-        fontFamily: useMono ? mono : 'inherit',
-        fontSize: useMono ? '11px' : '13px',
-        color: color || (useMono ? C.blue : C.textMid),
-        background: useMono ? C.elevated : 'transparent',
-        padding: useMono ? '6px 8px' : '0',
-        borderRadius: useMono ? '6px' : '0',
-        wordBreak: 'break-all', lineHeight: 1.6,
-      }}>
-        {value}
-      </div>
-    </div>
-  )
-
   const Tab = ({ id, label }) => (
     <button
       onClick={() => setActiveTab(id)}
@@ -344,14 +411,30 @@ function DetailPanel({ doc, onClose, onDelete }) {
           </>
         ) : (
           <>
-            <MetaRow label="Document Key" value={docId} mono />
+            <div style={{ marginBottom: '14px' }}>
+              <Label>Document Key (Block ID)</Label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <div style={{
+                  fontFamily: mono, fontSize: '11px', color: C.blue,
+                  background: C.elevated, padding: '6px 8px', borderRadius: '6px',
+                  wordBreak: 'break-all', lineHeight: 1.6, flex: 1,
+                }}>
+                  {docId}
+                </div>
+                <CopyBtn value={docId} style={{ fontSize: '14px', padding: '4px 7px' }} />
+              </div>
+            </div>
 
-            <MetaRow
-              label="CAS (Compare-and-Swap)"
-              value={doc.__cb_cas != null ? String(doc.__cb_cas) : '—'}
-              mono
-              color={C.muted}
-            />
+            <div style={{ marginBottom: '14px' }}>
+              <Label>CAS (Compare-and-Swap)</Label>
+              <div style={{
+                fontFamily: mono, fontSize: '11px', color: C.muted,
+                background: C.elevated, padding: '6px 8px', borderRadius: '6px',
+                wordBreak: 'break-all', lineHeight: 1.6,
+              }}>
+                {doc.__cb_cas != null ? String(doc.__cb_cas) : '—'}
+              </div>
+            </div>
 
             <div style={{ marginBottom: '14px' }}>
               <Label>Expiry</Label>
@@ -426,17 +509,60 @@ function DeleteConfirm({ docId, onClose, onConfirm }) {
   )
 }
 
-// ─── AI CLUSTER MODAL ─────────────────────────────────────────────────────────
+// ─── AUTO GROUP MODAL ─────────────────────────────────────────────────────────
 const CLUSTER_PROVIDERS = [
-  { id: 'anthropic', label: 'Claude',  placeholder: 'sk-ant-…',  model: 'claude-haiku-4-5-20251001' },
-  { id: 'openai',    label: 'OpenAI',  placeholder: 'sk-…',      model: 'gpt-4o-mini' },
-  { id: 'gemini',    label: 'Gemini',  placeholder: 'AIza…',     model: 'gemini-2.5-flash' },
+  { id: 'capella', label: 'Capella Model Service', placeholder: 'Bearer token / API key', model: '' },
+  { id: 'anthropic', label: 'Claude', placeholder: 'sk-ant-…', model: 'claude-haiku-4-5-20251001' },
+  { id: 'openai', label: 'OpenAI', placeholder: 'sk-…', model: 'gpt-4o-mini' },
+  { id: 'gemini', label: 'Gemini', placeholder: 'AIza…', model: 'gemini-2.5-flash' },
 ]
 
 const CLUSTER_PROMPT = (payload) =>
   `Cluster these memory documents into 3–7 concise themes (2-3 words each). Return ONLY valid JSON — no markdown: {"themes":{"Theme Name":["doc_id"],...}}\n\nDocuments: ${JSON.stringify(payload)}`
 
-async function callClusterAPI(provider, apiKey, prompt) {
+async function callClusterAPI(provider, apiKey, prompt, endpoint) {
+  if (provider === 'capella') {
+    let base
+    try {
+      base = new URL(endpoint.replace(/\/$/, '')).href.replace(/\/$/, '')
+    } catch {
+      throw new Error('Invalid endpoint URL. It should look like: https://your-model.ai.couchbase.com')
+    }
+    let res
+    try {
+      res = await fetch(`${base}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({ messages: [{ role: 'user', content: prompt }], max_tokens: 1024, stream: false }),
+      })
+    } catch (fetchErr) {
+      // fetch() throws TypeError when the network request fails entirely (CORS block, unreachable host, etc.)
+      if (fetchErr instanceof TypeError) {
+        throw new Error(
+          'Could not reach the Capella Model Service endpoint. ' +
+          'Check that the URL is correct and that the service allows browser requests (CORS). ' +
+          `Details: ${fetchErr.message}`
+        )
+      }
+      throw fetchErr
+    }
+    let data
+    try {
+      data = await res.json()
+    } catch {
+      throw new Error(`Capella Model Service returned a non-JSON response (HTTP ${res.status}). Check that the endpoint URL points to the model's completions path.`)
+    }
+    if (!res.ok) {
+      throw new Error(
+        data.error?.message ||
+        data.message ||
+        `Capella Model Service error (HTTP ${res.status}). Verify your API key and endpoint.`
+      )
+    }
+    const text = data.choices?.[0]?.message?.content
+    if (!text) throw new Error('Capella Model Service returned an empty response. The model may not have generated any content.')
+    return text
+  }
   if (provider === 'anthropic') {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -471,19 +597,21 @@ async function callClusterAPI(provider, apiKey, prompt) {
 }
 
 function ClusterModal({ docs, onClose, onApply }) {
-  const [provider, setProvider] = useState('anthropic')
+  const [provider, setProvider] = useState('capella')
   const [apiKey, setApiKey] = useState('')
+  const [endpoint, setEndpoint] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
   const providerMeta = CLUSTER_PROVIDERS.find(p => p.id === provider)
+  const canRun = provider === 'capella' ? (apiKey && endpoint) : !!apiKey
 
   const run = async () => {
     setBusy(true)
     setError('')
     try {
       const payload = docs.map(m => ({ id: m.__cb_key, text: getPrimaryText(m) || m.__cb_key })).filter(m => m.text)
-      const raw = await callClusterAPI(provider, apiKey, CLUSTER_PROMPT(payload))
+      const raw = await callClusterAPI(provider, apiKey, CLUSTER_PROMPT(payload), endpoint)
       const match = raw.match(/\{[\s\S]*\}/)
       if (!match) throw new Error('No JSON returned by the model')
       const parsed = JSON.parse(match[0])
@@ -498,27 +626,62 @@ function ClusterModal({ docs, onClose, onApply }) {
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200, padding: '24px' }}>
-      <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: '14px', width: '100%', maxWidth: '460px', padding: '24px', boxShadow: '0 16px 48px rgba(0,0,0,.6)' }}>
-        <div style={{ fontSize: '16px', fontWeight: 600, color: C.text, marginBottom: '6px', fontFamily: display }}>AI Auto-cluster</div>
+      <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: '14px', width: '100%', maxWidth: '480px', padding: '24px', boxShadow: '0 16px 48px rgba(0,0,0,.6)' }}>
+        <div style={{ fontSize: '16px', fontWeight: 600, color: C.text, marginBottom: '6px', fontFamily: display }}>Auto Group Memories</div>
         <p style={{ fontSize: '13px', color: C.muted, marginBottom: '18px', lineHeight: 1.6 }}>
-          Groups your memories into themes using AI. Your API key is used directly from the browser and never stored.
+          Groups your memories into themes using an LLM. Your API key is used directly from the browser and never stored.
         </p>
 
-        <div style={{ display: 'flex', gap: '6px', marginBottom: '16px', background: C.bg, borderRadius: '9px', padding: '4px' }}>
+        {/* Provider tabs */}
+        <div style={{ display: 'flex', gap: '6px', marginBottom: '16px', background: C.bg, borderRadius: '9px', padding: '4px', overflowX: 'auto' }}>
           {CLUSTER_PROVIDERS.map(p => (
             <button
               key={p.id}
-              onClick={() => { setProvider(p.id); setApiKey(''); setError('') }}
+              onClick={() => { setProvider(p.id); setApiKey(''); setEndpoint(''); setError('') }}
               style={{
-                flex: 1, padding: '6px 0', borderRadius: '6px', border: 'none', fontSize: '12.5px', fontWeight: 500, cursor: 'pointer',
+                flex: '0 0 auto', padding: '6px 10px', borderRadius: '6px', border: 'none', fontSize: '12px', fontWeight: 500, cursor: 'pointer',
                 background: provider === p.id ? C.elevated : 'transparent',
                 color: provider === p.id ? C.text : C.muted,
                 boxShadow: provider === p.id ? `0 0 0 1px ${C.border}` : 'none',
-                transition: 'all 0.12s',
+                transition: 'all 0.12s', whiteSpace: 'nowrap',
               }}
             >{p.label}</button>
           ))}
         </div>
+
+        {/* Capella badges */}
+        {provider === 'capella' && (
+          <div style={{ marginBottom: '14px', display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+            <span style={{ fontSize: '11px', padding: '2px 9px', borderRadius: '10px', background: 'rgba(63,185,80,.1)', color: C.green, border: '1px solid rgba(63,185,80,.25)', fontWeight: 500 }}>
+              Most secure
+            </span>
+            <span style={{ fontSize: '11px', padding: '2px 9px', borderRadius: '10px', background: 'rgba(63,185,80,.1)', color: C.green, border: '1px solid rgba(63,185,80,.25)', fontWeight: 500 }}>
+              Cost effective
+            </span>
+            <span style={{ fontSize: '11px', padding: '2px 9px', borderRadius: '10px', background: 'rgba(88,166,255,.08)', color: C.muted, border: `1px solid ${C.border}` }}>
+              LLM only — not for embeddings
+            </span>
+          </div>
+        )}
+
+        {/* Capella endpoint field */}
+        {provider === 'capella' && (
+          <div style={{ marginBottom: '12px' }}>
+            <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: C.muted, marginBottom: '6px' }}>
+              Model Endpoint URL
+            </label>
+            <input
+              type="text"
+              value={endpoint}
+              onChange={e => setEndpoint(e.target.value)}
+              placeholder="https://your-model.ai.couchbase.com"
+              style={{ width: '100%', padding: '9px 12px', background: C.elevated, border: `1px solid ${C.border}`, borderRadius: '8px', color: C.text, fontSize: '13px', outline: 'none', fontFamily: mono, boxSizing: 'border-box' }}
+            />
+            <div style={{ fontFamily: mono, fontSize: '10px', color: C.faint, marginTop: '4px' }}>
+              From Capella AI &rsaquo; Model Service &rsaquo; your deployed model endpoint
+            </div>
+          </div>
+        )}
 
         <div style={{ marginBottom: '16px' }}>
           <label style={{ display: 'block', fontSize: '12px', fontWeight: 500, color: C.muted, marginBottom: '6px' }}>
@@ -538,10 +701,10 @@ function ClusterModal({ docs, onClose, onApply }) {
           <button onClick={onClose} style={{ padding: '8px 16px', borderRadius: '7px', border: `1px solid ${C.border}`, background: 'transparent', color: C.muted, fontSize: '13px', cursor: 'pointer' }}>Cancel</button>
           <button
             onClick={run}
-            disabled={!apiKey || busy}
-            style={{ padding: '8px 18px', borderRadius: '7px', border: 'none', background: C.blue, color: '#fff', fontSize: '13px', fontWeight: 600, cursor: !apiKey || busy ? 'not-allowed' : 'pointer', opacity: !apiKey || busy ? 0.6 : 1 }}
+            disabled={!canRun || busy}
+            style={{ padding: '8px 18px', borderRadius: '7px', border: 'none', background: C.blue, color: '#fff', fontSize: '13px', fontWeight: 600, cursor: !canRun || busy ? 'not-allowed' : 'pointer', opacity: !canRun || busy ? 0.6 : 1 }}
           >
-            {busy ? 'Clustering…' : '✦ Cluster'}
+            {busy ? 'Grouping…' : '✦ Group'}
           </button>
         </div>
       </div>
@@ -566,6 +729,7 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
   const [themes, setThemes] = useState({})
   const [activeFilter, setActiveFilter] = useState(null)
   const [searchVal, setSearchVal] = useState('')
+  const [timeRange, setTimeRange] = useState(null)
 
   const [selectedId, setSelectedId] = useState(null)
   const [deleteId, setDeleteId] = useState(null)
@@ -582,11 +746,12 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
   const queryParams = useCallback(() => {
     const params = { limit: LIMIT, offset }
     if (searchVal) params.search = searchVal
+    if (timeRange) params.time_range = timeRange
     if (!activeFilter) return params
     if (activeFilter.key.startsWith('type:')) return { ...params, type: activeFilter.key.slice(5) }
     if (activeFilter.key.startsWith('user:')) return { ...params, user_id: activeFilter.key.slice(5) }
     return params
-  }, [activeFilter, offset, searchVal])
+  }, [activeFilter, offset, searchVal, timeRange])
 
   const fetchDocs = useCallback(async () => {
     setLoading(true)
@@ -641,6 +806,12 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
     setSelectedId(null)
   }
 
+  const handleTimeRange = (val) => {
+    setTimeRange(val)
+    setOffset(0)
+    setSelectedId(null)
+  }
+
   const handleDelete = async () => {
     try {
       await api.deleteMemory(deleteId)
@@ -660,7 +831,7 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
     const idToTheme = {}
     Object.entries(newThemes).forEach(([name, ids]) => ids.forEach(id => { idToTheme[id] = name }))
     setDocs(prev => prev.map(d => ({ ...d, __theme: idToTheme[d.__cb_key] || d.__theme })))
-    showToast(`Clustered into ${Object.keys(newThemes).length} themes`)
+    showToast(`Grouped into ${Object.keys(newThemes).length} themes`)
   }
 
   const selectedDoc = selectedId ? docs.find(d => d.__cb_key === selectedId) : null
@@ -722,8 +893,10 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
           groups={groups}
           themes={themes}
           activeFilter={activeFilter}
+          timeRange={timeRange}
           onFilter={handleFilter}
           onSearch={handleSearch}
+          onTimeRange={handleTimeRange}
           onAutoCluster={() => setShowCluster(true)}
           clustering={clustering}
         />
@@ -756,7 +929,18 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
           {!loading && !noIndex && visibleDocs.length === 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '80px 20px', textAlign: 'center' }}>
               <div style={{ fontSize: '28px', marginBottom: '12px' }}>◉</div>
-              <div style={{ fontFamily: mono, fontSize: '13px', color: C.muted }}>No memories match</div>
+              <div style={{ fontFamily: display, fontSize: '15px', fontWeight: 600, color: C.text, marginBottom: '8px' }}>No memories match</div>
+              {searchVal && (
+                <div style={{ fontFamily: mono, fontSize: '11px', color: C.faint, marginTop: '4px' }}>
+                  Searched for Block ID or text: <span style={{ color: C.blue }}>{searchVal}</span>
+                </div>
+              )}
+              {timeRange && (
+                <div style={{ fontSize: '12px', color: C.faint, marginTop: '8px', maxWidth: '360px', lineHeight: 1.6 }}>
+                  Time range filter is active (<span style={{ color: C.yellow }}>{timeRange === 'hour' ? '1 hour' : timeRange === 'day' ? '24 hours' : '7 days'}</span>).
+                  This filters on the <span style={{ fontFamily: mono, color: C.muted }}>created_at</span> field — memories without that field are excluded.
+                </div>
+              )}
             </div>
           )}
 

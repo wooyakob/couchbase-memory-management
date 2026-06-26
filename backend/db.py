@@ -95,22 +95,36 @@ class ConnectionManager:
         search: Optional[str] = None,
         type_filter: Optional[str] = None,
         user_filter: Optional[str] = None,
+        time_range: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ) -> Dict[str, Any]:
+        from datetime import datetime, timedelta, timezone
+
         path = self._col_path()
         conditions: List[str] = []
         params: Dict[str, Any] = {"lim": limit, "off": offset}
 
         if search:
-            conditions.append("LOWER(TO_STRING(m)) LIKE $search")
-            params["search"] = f"%{search.lower()}%"
+            # Exact match on document key OR substring match in document body
+            conditions.append("(META(m).id = $search_exact OR LOWER(TO_STRING(m)) LIKE $search_like)")
+            params["search_exact"] = search
+            params["search_like"] = f"%{search.lower()}%"
         if type_filter:
             conditions.append("m.`type` = $type_filter")
             params["type_filter"] = type_filter
         if user_filter:
             conditions.append("m.user_id = $user_filter")
             params["user_filter"] = user_filter
+        if time_range:
+            deltas = {"hour": timedelta(hours=1), "day": timedelta(days=1), "week": timedelta(weeks=1)}
+            delta = deltas.get(time_range)
+            if delta:
+                time_from = (datetime.now(timezone.utc) - delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+                # Compares created_at as an ISO 8601 string. Documents missing created_at
+                # or storing it as a Unix integer will be excluded by this condition.
+                conditions.append("m.created_at IS NOT MISSING AND m.created_at >= $time_from")
+                params["time_from"] = time_from
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
