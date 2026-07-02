@@ -6,7 +6,8 @@ Covers:
 - Listing returns paginated documents
 - Listing with search filter passes it through
 - Listing with type / user_id filter passes it through
-- No-primary-index error returns 422 with detail "no_primary_index"
+- No-index error triggers automatic index creation + retry
+- Automatic index creation still-building/failure fall back to 503 / 422 "no_index"
 - Group query returns type and user_id groups
 - Delete single document
 - Delete document not found returns 404
@@ -17,6 +18,8 @@ Covers:
 import pytest
 from unittest.mock import MagicMock, patch, call
 from couchbase.exceptions import DocumentNotFoundException
+
+from tests.conftest import manager_for
 
 
 # ---------------------------------------------------------------------------
@@ -89,18 +92,115 @@ class TestListMemories:
         resp = client.get("/api/memories?user_id=u1")
         assert resp.status_code == 200
 
-    def test_list_no_primary_index_returns_422(self, connected_client):
-        from db import connection_manager
-        connection_manager._cluster.query.side_effect = Exception(
+    def test_list_no_index_returns_422(self, connected_client):
+        manager_for(connected_client)._cluster.query.side_effect = Exception(
             "No index available on keyspace - INDEX_NOT_FOUND"
         )
         resp = connected_client.get("/api/memories")
         assert resp.status_code == 422
-        assert resp.json()["detail"] == "no_primary_index"
+        assert resp.json()["detail"] == "no_index"
+
+    def test_list_auto_creates_index_and_retries(self, connected_client_with_docs):
+        """The first query hits a missing index — instead of just reporting
+        the error, list_memories should create the recommended indexes
+        itself and retry, returning the actual memories."""
+        client, cluster = connected_client_with_docs
+        base_side_effect = cluster.query.side_effect
+        state = {"failed_once": False}
+
+        def flaky(q, *args, **kwargs):
+            if "COUNT(*)" in q and not state["failed_once"]:
+                state["failed_once"] = True
+                raise Exception("No index available on keyspace - INDEX_NOT_FOUND")
+            return base_side_effect(q, *args, **kwargs)
+
+        cluster.query.side_effect = flaky
+
+        resp = client.get("/api/memories")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 2
+        assert len(body["documents"]) == 2
+
+        create_calls = [c for c in cluster.query.call_args_list if "CREATE INDEX" in str(c)]
+        assert len(create_calls) == 5
+
+    def test_list_index_still_building_returns_503(self, connected_client_with_docs):
+        """If the auto-created indexes haven't come online yet, report a
+        retryable 503 rather than a dead-end error."""
+        client, cluster = connected_client_with_docs
+        manager = manager_for(client)
+        cluster.query.side_effect = Exception("No index available on keyspace - INDEX_NOT_FOUND")
+
+        with patch.object(manager, "create_recommended_indexes", side_effect=TimeoutError("still building")):
+            resp = client.get("/api/memories")
+
+        assert resp.status_code == 503
+
+    def test_list_auto_create_failure_falls_back_to_no_index(self, connected_client_with_docs):
+        """If the auto-heal attempt itself fails outright (not a timeout),
+        fall back to the manual-recovery 422 the frontend already knows
+        how to handle."""
+        client, cluster = connected_client_with_docs
+        manager = manager_for(client)
+        cluster.query.side_effect = Exception("No index available on keyspace - INDEX_NOT_FOUND")
+
+        with patch.object(manager, "create_recommended_indexes", side_effect=RuntimeError("no privileges")):
+            resp = client.get("/api/memories")
+
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "no_index"
+
+    def test_list_falls_back_to_primary_index_when_secondary_retry_still_fails(self, connected_client_with_docs):
+        """If the recommended secondary indexes were created but the retried
+        query still hits an index error (e.g. not fully online yet on
+        Capella), fall back to a primary index and retry once more instead
+        of dead-ending in a 422."""
+        client, cluster = connected_client_with_docs
+        manager = manager_for(client)
+        base_side_effect = cluster.query.side_effect
+        state = {"calls": 0}
+
+        def flaky(q, *args, **kwargs):
+            if "COUNT(*)" in q:
+                state["calls"] += 1
+                if state["calls"] <= 2:
+                    raise Exception("No index available on keyspace - INDEX_NOT_FOUND")
+            return base_side_effect(q, *args, **kwargs)
+
+        cluster.query.side_effect = flaky
+
+        with patch.object(manager, "create_recommended_indexes", return_value=list(manager._RECOMMENDED_INDEXES)):
+            resp = client.get("/api/memories")
+
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 2
+
+    def test_list_primary_index_fallback_still_building_returns_503(self, connected_client_with_docs):
+        client, cluster = connected_client_with_docs
+        manager = manager_for(client)
+        cluster.query.side_effect = Exception("No index available on keyspace - INDEX_NOT_FOUND")
+
+        with patch.object(manager, "create_recommended_indexes", side_effect=RuntimeError("no privileges")), \
+             patch.object(manager, "create_primary_index", side_effect=TimeoutError("still building")):
+            resp = client.get("/api/memories")
+
+        assert resp.status_code == 503
+
+    def test_list_primary_index_fallback_failure_returns_no_index(self, connected_client_with_docs):
+        client, cluster = connected_client_with_docs
+        manager = manager_for(client)
+        cluster.query.side_effect = Exception("No index available on keyspace - INDEX_NOT_FOUND")
+
+        with patch.object(manager, "create_recommended_indexes", side_effect=RuntimeError("no privileges")), \
+             patch.object(manager, "create_primary_index", side_effect=RuntimeError("still no privileges")):
+            resp = client.get("/api/memories")
+
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == "no_index"
 
     def test_list_sdk_error_returns_500(self, connected_client):
-        from db import connection_manager
-        connection_manager._cluster.query.side_effect = RuntimeError("cluster error")
+        manager_for(connected_client)._cluster.query.side_effect = RuntimeError("cluster error")
         resp = connected_client.get("/api/memories")
         assert resp.status_code == 500
 

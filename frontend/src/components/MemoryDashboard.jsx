@@ -762,7 +762,7 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
     return params
   }, [activeFilter, offset, searchVal, timeRange])
 
-  const fetchDocs = useCallback(async () => {
+  const fetchDocs = useCallback(async (retry = 0) => {
     setLoading(true)
     setNoIndex(false)
     try {
@@ -771,9 +771,17 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
       setDocs(res.documents || [])
       setTotal(res.total || 0)
     } catch (e) {
-      if (e.detail === 'no_primary_index' || (e.message || '').includes('no_primary_index')) {
+      if (e.detail === 'no_index' || (e.message || '').includes('no_index')) {
+        // Backend already tried to auto-create the recommended indexes and
+        // couldn't (e.g. the credential can't manage indexes) — fall back
+        // to the manual "Create Secondary Indexes" button.
         setNoIndex(true)
         setDocs([])
+      } else if (e.status === 503 && retry < 5) {
+        // Indexes were just created and are still coming online — the
+        // backend already retried once; keep polling here instead of
+        // surfacing an error the user would have to act on.
+        setTimeout(() => fetchDocs(retry + 1), 3000)
       } else {
         showToast(e.message, 'error')
       }
@@ -793,7 +801,7 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
     try {
       await api.createIndex()
       setNoIndex(false)
-      showToast('Primary index created')
+      showToast('Secondary indexes created')
       fetchDocs()
       api.getGroups().then(setGroups).catch(() => {})
     } catch (e) {
@@ -915,16 +923,16 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
           {noIndex && !loading && (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '80px 20px', textAlign: 'center' }}>
               <div style={{ fontSize: '32px', marginBottom: '12px' }}>🗂</div>
-              <div style={{ fontFamily: display, fontSize: '18px', fontWeight: 600, color: C.text, marginBottom: '8px' }}>No primary index</div>
+              <div style={{ fontFamily: display, fontSize: '18px', fontWeight: 600, color: C.text, marginBottom: '8px' }}>No index available</div>
               <p style={{ fontSize: '13px', color: C.muted, marginBottom: '24px', maxWidth: '380px', lineHeight: 1.7 }}>
-                This collection needs a primary index before it can be queried. Create one to start browsing memories.
+                This collection needs an index before it can be queried. Create secondary indexes on the common filter fields (type, user_id, created_at, block_id) plus a keys-only index on the document ID, so browsing and pagination don't require a primary index.
               </p>
               <button
                 onClick={handleCreateIndex}
                 disabled={creatingIndex}
                 style={{ padding: '10px 24px', borderRadius: '8px', border: 'none', background: C.cbRed, color: '#fff', fontSize: '14px', fontWeight: 600, cursor: creatingIndex ? 'not-allowed' : 'pointer', opacity: creatingIndex ? 0.7 : 1, boxShadow: '0 2px 12px rgba(234,35,40,.4)' }}
               >
-                {creatingIndex ? 'Creating index…' : 'Create Primary Index'}
+                {creatingIndex ? 'Creating indexes…' : 'Create Secondary Indexes'}
               </button>
             </div>
           )}

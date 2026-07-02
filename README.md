@@ -50,7 +50,7 @@ cd frontend && npm install
 
 ```bash
 # Pull and run from Docker Hub
-docker run -p 8000:8000 wooyakob/memory-manager:latest
+docker run -p 8000:8000 wooyakob/memory-manager:v1.2.0
 
 # Or build and run locally
 docker compose up --build
@@ -64,18 +64,23 @@ Opens at http://localhost:8000 — the backend serves the built frontend.
 
 1. Enter your Couchbase connection string, username, and password
 2. Select a bucket → scope → collection
-3. If prompted, create a primary index (required for N1QL queries)
+3. If prompted, create the recommended secondary indexes (required for N1QL queries) — these cover `type`, `user_id`, `created_at`, and `block_id` for filtered browsing, plus a keys-only index on the document ID for unfiltered browsing/pagination. Primary indexes aren't created since they aren't recommended for production use.
 
-> **Running via Docker?** Use `host.docker.internal` instead of `localhost` — inside the container, `localhost` refers to the container itself, not your machine.
-> ```
-> couchbase://host.docker.internal
-> ```
+> **Connecting to a Couchbase Server running on your own machine?** The right host depends on how the *backend* itself is running, not how you start it in general:
+> - **Backend running via `./start.sh`** (a plain process on your machine, not containerized) → use `localhost`. `host.docker.internal` doesn't resolve here — nothing is putting the backend inside a Docker network.
+>   ```
+>   couchbase://localhost
+>   ```
+> - **Backend running via `docker run` / `docker compose`** (the backend itself is inside a container) → use `host.docker.internal`, since `localhost` from inside that container refers to the container, not your machine.
+>   ```
+>   couchbase://host.docker.internal
+>   ```
 
 ### Example (agentmem on Couchbase Server)
 
 | Field | Value |
 |-------|-------|
-| Connection string | `couchbase://localhost` (or `couchbase://host.docker.internal` if using Docker) |
+| Connection string | `couchbase://localhost` (`./start.sh`) or `couchbase://host.docker.internal` (Docker) — see note above |
 | Bucket | `agentmems` |
 | Scope | `agentmem` |
 | Collection | `memory` |

@@ -1,5 +1,6 @@
 import os
 import sys
+from contextlib import asynccontextmanager
 
 # Ensure the backend directory is on sys.path so routers can import db/models
 sys.path.insert(0, os.path.dirname(__file__))
@@ -10,8 +11,17 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from routers import connect, memories, cluster
+from session_store import session_store
 
-app = FastAPI(title="Couchbase Memory Management", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    for manager in session_store.all_managers():
+        manager.disconnect()
+
+
+app = FastAPI(title="Couchbase Memory Management", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

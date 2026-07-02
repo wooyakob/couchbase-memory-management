@@ -1,9 +1,15 @@
 from couchbase.cluster import Cluster
 from couchbase.options import ClusterOptions, QueryOptions
 from couchbase.auth import PasswordAuthenticator
+from couchbase.exceptions import (
+    CouchbaseException,
+    QueryIndexAlreadyExistsException,
+    QueryIndexNotFoundException,
+)
 from datetime import timedelta
 from typing import Optional, Dict, Any, List
 import threading
+import time
 
 
 class ConnectionManager:
@@ -140,7 +146,11 @@ class ConnectionManager:
         elif scoped_conditions:
             where = f"WHERE {' AND '.join(scoped_conditions)}"
         else:
-            where = ""
+            # Always-true predicate on the document key so the planner has a
+            # sargable clause to match against idx_mm_docid — a bare query with
+            # no WHERE at all won't pick up any secondary index and falls back
+            # to requiring a primary index.
+            where = "WHERE META(m).id IS NOT MISSING"
 
         count_q = f"SELECT COUNT(*) AS total FROM {path} AS m {where}"
         count_rows = list(self._cluster.query(count_q, QueryOptions(named_parameters=params)))
@@ -201,9 +211,106 @@ class ConnectionManager:
         )
         col.remove(doc_id)
 
-    def create_primary_index(self) -> None:
+    # Secondary indexes covering the predicates query_documents() actually
+    # filters on. These are always tried first — a primary index scans every
+    # document for every query and isn't recommended in production, so it's
+    # only created as a fallback (see create_primary_index below) when these
+    # targeted indexes can't be created or don't resolve retrieval.
+    #
+    # idx_mm_docid indexes only the document key (not the document body) so
+    # the unfiltered "browse everything" view and its ORDER BY META(m).id
+    # pagination can be satisfied by an index scan instead of falling back
+    # to a primary index.
+    _RECOMMENDED_INDEXES = {
+        "idx_mm_docid": "META().id",
+        "idx_mm_type": "`type`",
+        "idx_mm_user_id": "user_id",
+        "idx_mm_created_at": "created_at",
+        "idx_mm_block_id": "block_id",
+    }
+
+    # Last-resort fallback name, used only by create_primary_index() below.
+    _PRIMARY_INDEX_NAME = "idx_mm_primary"
+
+    _DDL_RETRY_ATTEMPTS = 3
+    _DDL_RETRY_WAIT_SECONDS = 2
+
+    def _execute_ddl(self, statement: str) -> None:
+        # cluster.query() is lazy — the SDK doesn't submit anything to the
+        # server until the result is iterated (or .execute() is called), so
+        # the statement must actually be consumed here or it silently never
+        # runs. Capella's DDL path is also flakier than self-managed
+        # Server's, so a transient CouchbaseException gets a few retries
+        # rather than forcing the caller to redo the whole index flow.
+        last_err = None
+        for attempt in range(self._DDL_RETRY_ATTEMPTS):
+            try:
+                list(self._cluster.query(statement))
+                return
+            except QueryIndexAlreadyExistsException:
+                return
+            except CouchbaseException as e:
+                last_err = e
+                if attempt < self._DDL_RETRY_ATTEMPTS - 1:
+                    time.sleep(self._DDL_RETRY_WAIT_SECONDS)
+        raise last_err
+
+    def _wait_for_indexes_online(self, names: List[str], timeout_seconds: float) -> None:
+        # CREATE INDEX returns as soon as the index is registered, not once it's
+        # built and online. On Capella this gap is worse than on self-managed
+        # Server: the query and indexer services run on separate nodes, so a
+        # freshly created index can be briefly invisible even to a
+        # collection-scoped lookup for its own name — the SDK's own
+        # watch_indexes()/build_deferred_indexes() raise
+        # QueryIndexNotFoundException in that window instead of tolerating
+        # "not visible yet", so we poll get_all_indexes() ourselves and treat
+        # a missing name the same as "not online yet". Only that specific
+        # exception is tolerated — anything else (e.g. a Capella credential
+        # that can CREATE INDEX but lacks privileges to list indexes) is a
+        # real failure and must not be swallowed into a misleading timeout.
+        index_mgr = (
+            self._cluster
+            .bucket(self._bucket_name)
+            .scope(self._scope_name)
+            .collection(self._collection_name)
+            .query_indexes()
+        )
+        deadline = time.monotonic() + timeout_seconds
+        pending = set(names)
+        while pending:
+            try:
+                states = {idx.name: idx.state for idx in index_mgr.get_all_indexes()}
+            except QueryIndexNotFoundException:
+                states = {}
+            pending = {n for n in pending if states.get(n) != "online"}
+            if not pending:
+                break
+            if any(states.get(n) == "deferred" for n in pending):
+                index_mgr.build_deferred_indexes()
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Indexes did not come online in time: {', '.join(sorted(pending))}"
+                )
+            time.sleep(1)
+
+    def create_recommended_indexes(self, timeout_seconds: float = 60) -> List[str]:
         path = self._col_path()
-        self._cluster.query(f"CREATE PRIMARY INDEX IF NOT EXISTS ON {path}")
+        names = list(self._RECOMMENDED_INDEXES.keys())
+        for name, key in self._RECOMMENDED_INDEXES.items():
+            self._execute_ddl(f"CREATE INDEX `{name}` IF NOT EXISTS ON {path} ({key})")
+        self._wait_for_indexes_online(names, timeout_seconds)
+        return names
 
-
-connection_manager = ConnectionManager()
+    def create_primary_index(self, timeout_seconds: float = 60) -> str:
+        # Only reached as a last resort when the targeted secondary indexes
+        # above can't satisfy a query on Capella (e.g. still building, or the
+        # credential can't manage GSIs the way this needs). A primary index
+        # scans every document body for every query, so it's deliberately
+        # not created by default — see the _RECOMMENDED_INDEXES comment —
+        # but it guarantees memories stay retrievable when the targeted
+        # indexes fall short.
+        path = self._col_path()
+        name = self._PRIMARY_INDEX_NAME
+        self._execute_ddl(f"CREATE PRIMARY INDEX `{name}` IF NOT EXISTS ON {path}")
+        self._wait_for_indexes_online([name], timeout_seconds)
+        return name

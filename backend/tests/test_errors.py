@@ -2,7 +2,7 @@
 Tests for edge-case error handling, index detection, and state isolation.
 
 Covers:
-- Various N1QL index error message variants all map to no_primary_index
+- Various N1QL index error message variants all map to no_index
 - Cluster state is not shared across test invocations
 - Reconnecting after a failed attempt allows a subsequent successful connect
 - Large document payload is accepted
@@ -11,6 +11,8 @@ Covers:
 import pytest
 from unittest.mock import patch, MagicMock
 from couchbase.exceptions import AuthenticationException, UnAmbiguousTimeoutException
+
+from tests.conftest import manager_for
 
 
 INDEX_ERROR_VARIANTS = [
@@ -22,23 +24,24 @@ INDEX_ERROR_VARIANTS = [
 
 
 class TestIndexErrorVariants:
-    """All known N1QL error message shapes should produce 422 no_primary_index."""
+    """All known N1QL error message shapes should produce 422 no_index."""
 
     @pytest.mark.parametrize("error_msg", INDEX_ERROR_VARIANTS)
     def test_index_error_variant(self, connected_client, error_msg):
-        from db import connection_manager
-        connection_manager._cluster.query.side_effect = Exception(error_msg)
+        manager_for(connected_client)._cluster.query.side_effect = Exception(error_msg)
         resp = connected_client.get("/api/memories")
         assert resp.status_code == 422
-        assert resp.json()["detail"] == "no_primary_index"
+        assert resp.json()["detail"] == "no_index"
 
 
 class TestStateIsolation:
     """Connection state must not bleed between requests."""
 
     def test_not_connected_after_fresh_client(self, client):
-        from db import connection_manager
-        assert not connection_manager.is_connected
+        # A brand new client has no session yet; hitting a connection-gated
+        # endpoint should report not-connected rather than reusing stale state.
+        resp = client.get("/api/buckets/test-bucket/scopes")
+        assert resp.status_code == 400
 
     def test_no_collection_after_connect_only(self, client, mock_cluster):
         with patch("db.Cluster", return_value=mock_cluster):
@@ -47,9 +50,9 @@ class TestStateIsolation:
                 "username": "Administrator",
                 "password": "password",
             })
-        from db import connection_manager
-        assert connection_manager.is_connected
-        assert not connection_manager.has_collection
+        manager = manager_for(client)
+        assert manager.is_connected
+        assert not manager.has_collection
 
     def test_collection_set_after_select(self, connected_client):
         connected_client.post("/api/collection", json={
@@ -57,8 +60,7 @@ class TestStateIsolation:
             "scope": "_default",
             "collection": "_default",
         })
-        from db import connection_manager
-        assert connection_manager.has_collection
+        assert manager_for(connected_client).has_collection
 
 
 class TestRetryAfterFailure:
@@ -119,15 +121,16 @@ class TestConnectionInfo:
             "scope": "_default",
             "collection": "_default",
         })
-        from db import connection_manager
-        info = connection_manager.connection_info
+        info = manager_for(connected_client).connection_info
         assert info["bucket"] == "test-bucket"
         assert info["scope"] == "_default"
         assert info["collection"] == "_default"
 
     def test_connection_info_cleared_after_disconnect(self, connected_client):
+        # Disconnect drops the whole session, so grab the manager first —
+        # .disconnect() clears its fields even after it's evicted from the store.
+        manager = manager_for(connected_client)
         connected_client.delete("/api/connect")
-        from db import connection_manager
-        info = connection_manager.connection_info
+        info = manager.connection_info
         assert info["bucket"] is None
         assert info["collection"] is None

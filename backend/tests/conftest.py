@@ -8,11 +8,33 @@ pre-wired mocks for the most common SDK behaviours.
 import sys
 import os
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock
 from fastapi.testclient import TestClient
 
 # Ensure backend/ is importable when pytest is run from the project root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+
+def manager_for(client):
+    """Look up the ConnectionManager bound to a TestClient's session cookie."""
+    from session_store import session_store, SESSION_COOKIE_NAME
+
+    session_id = client.cookies.get(SESSION_COOKIE_NAME)
+    return session_store._sessions[session_id]
+
+
+@pytest.fixture(autouse=True)
+def _reset_session_store():
+    """Sessions are held in a module-level store; clear it between tests
+    so state from one test's sessions never leaks into another's."""
+    from session_store import session_store
+
+    session_store._sessions.clear()
+    session_store._last_used.clear()
+    yield
+    session_store._sessions.clear()
+    session_store._last_used.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +87,7 @@ def _make_cluster(
     def _side_effect(q, *args, **kwargs):
         if "COUNT(*)" in q:
             return iter([{"total": query_total}])
-        if "CREATE PRIMARY INDEX" in q:
+        if "CREATE INDEX" in q or "CREATE PRIMARY INDEX" in q:
             return iter([])
         return iter(query_docs)
 
@@ -76,6 +98,17 @@ def _make_cluster(
     kv_col.upsert.return_value = MagicMock()
     kv_col.remove.return_value = MagicMock()
     cluster.bucket.return_value.scope.return_value.collection.return_value = kv_col
+
+    # Collection-scoped query index manager — report every recommended index
+    # as already online so create_recommended_indexes()'s wait loop resolves
+    # on its first poll instead of actually sleeping in tests.
+    def _all_indexes():
+        from db import ConnectionManager
+
+        names = list(ConnectionManager._RECOMMENDED_INDEXES) + [ConnectionManager._PRIMARY_INDEX_NAME]
+        return [SimpleNamespace(name=n, state="online") for n in names]
+
+    kv_col.query_indexes.return_value.get_all_indexes.side_effect = _all_indexes
 
     return cluster
 
@@ -102,21 +135,8 @@ def client(mock_cluster):
     with patch("db.Cluster", return_value=mock_cluster):
         # Import app *after* the patch is active so db.py sees the mock
         from main import app
-        from db import connection_manager
-
-        # Reset singleton state between tests
-        connection_manager._cluster = None
-        connection_manager._bucket_name = None
-        connection_manager._scope_name = None
-        connection_manager._collection_name = None
 
         yield TestClient(app)
-
-        # Cleanup
-        connection_manager._cluster = None
-        connection_manager._bucket_name = None
-        connection_manager._scope_name = None
-        connection_manager._collection_name = None
 
 
 @pytest.fixture
@@ -158,12 +178,6 @@ def connected_client_with_docs(mock_cluster):
 
     with patch("db.Cluster", return_value=cluster):
         from main import app
-        from db import connection_manager
-
-        connection_manager._cluster = None
-        connection_manager._bucket_name = None
-        connection_manager._scope_name = None
-        connection_manager._collection_name = None
 
         c = TestClient(app)
         c.post("/api/connect", json={
@@ -178,8 +192,3 @@ def connected_client_with_docs(mock_cluster):
         })
 
         yield c, cluster
-
-        connection_manager._cluster = None
-        connection_manager._bucket_name = None
-        connection_manager._scope_name = None
-        connection_manager._collection_name = None
