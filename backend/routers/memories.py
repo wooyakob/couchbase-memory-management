@@ -8,7 +8,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from models import UpdateDocumentRequest, BulkDeleteRequest
+from models import UpdateDocumentRequest, BulkDeleteRequest, DocsByIdsRequest
 from db import ConnectionManager
 from dependencies import SessionContext, get_session
 
@@ -33,7 +33,7 @@ def _is_index_error(e: Exception) -> bool:
 _VALID_TIME_RANGES = {"hour", "day", "week"}
 
 
-async def _fall_back_to_primary_index(ctx: SessionContext, query_args: tuple):
+async def _fall_back_to_primary_index(ctx: SessionContext, fn, args: tuple):
     # Last resort: the targeted secondary indexes didn't get created or
     # didn't resolve retrieval (e.g. still building, or the Capella
     # credential can't manage GSIs the way this needs). A primary index
@@ -50,9 +50,47 @@ async def _fall_back_to_primary_index(ctx: SessionContext, query_args: tuple):
         raise HTTPException(status_code=422, detail="no_index")
 
     try:
-        return await run_in_threadpool(ctx.manager.query_documents, *query_args)
+        return await run_in_threadpool(fn, *args)
     except Exception as final_err:
         raise HTTPException(status_code=500, detail=str(final_err))
+
+
+async def _run_with_index_heal(ctx: SessionContext, fn, *args):
+    # Runs a read that needs an index, self-healing if none is usable yet:
+    # create the recommended secondary indexes and retry, and only if that
+    # still doesn't resolve retrieval fall back to a primary index. The manual
+    # "Create Secondary Indexes" button (POST /api/index) stays as a fallback
+    # for when this self-heal can't complete (e.g. still building, or the
+    # credential can't manage indexes on Capella). Shared by every filtered
+    # read so browsing, clustering-input, and group paging heal identically.
+    try:
+        return await run_in_threadpool(fn, *args)
+    except Exception as e:
+        if not _is_index_error(e):
+            raise HTTPException(status_code=500, detail=str(e))
+
+        logger.warning("Query failed with index-related error, creating recommended indexes: %s", e)
+        try:
+            await run_in_threadpool(ctx.manager.create_recommended_indexes)
+        except TimeoutError:
+            raise HTTPException(
+                status_code=503,
+                detail="Indexes are being created and are still coming online — try again shortly.",
+            )
+        except Exception as create_err:
+            logger.warning("Automatic index creation failed: %s", create_err)
+            return await _fall_back_to_primary_index(ctx, fn, args)
+
+        try:
+            return await run_in_threadpool(fn, *args)
+        except Exception as retry_err:
+            if not _is_index_error(retry_err):
+                raise HTTPException(status_code=500, detail=str(retry_err))
+            logger.warning(
+                "Recommended indexes didn't resolve retrieval, falling back to a primary index: %s",
+                retry_err,
+            )
+            return await _fall_back_to_primary_index(ctx, fn, args)
 
 
 @router.get("")
@@ -71,41 +109,40 @@ async def list_memories(
             status_code=400,
             detail=f"Invalid time_range '{time_range}'. Must be one of: hour, day, week.",
         )
-    query_args = (search, type, user_id, time_range, limit, offset)
-    try:
-        return await run_in_threadpool(ctx.manager.query_documents, *query_args)
-    except Exception as e:
-        if not _is_index_error(e):
-            raise HTTPException(status_code=500, detail=str(e))
+    return await _run_with_index_heal(
+        ctx, ctx.manager.query_documents, search, type, user_id, time_range, limit, offset
+    )
 
-        # No usable index yet — create the recommended ones ourselves and
-        # retry, so the caller gets memories back instead of just an error
-        # they have to act on. The manual "Create Secondary Indexes" button
-        # (POST /api/index) stays as a fallback for when this self-heal
-        # can't complete (e.g. still building, or the credential can't
-        # manage indexes on Capella).
-        logger.warning("Query failed with index-related error, creating recommended indexes: %s", e)
-        try:
-            await run_in_threadpool(ctx.manager.create_recommended_indexes)
-        except TimeoutError:
-            raise HTTPException(
-                status_code=503,
-                detail="Indexes are being created and are still coming online — try again shortly.",
-            )
-        except Exception as create_err:
-            logger.warning("Automatic index creation failed: %s", create_err)
-            return await _fall_back_to_primary_index(ctx, query_args)
 
-        try:
-            return await run_in_threadpool(ctx.manager.query_documents, *query_args)
-        except Exception as retry_err:
-            if not _is_index_error(retry_err):
-                raise HTTPException(status_code=500, detail=str(retry_err))
-            logger.warning(
-                "Recommended indexes didn't resolve retrieval, falling back to a primary index: %s",
-                retry_err,
-            )
-            return await _fall_back_to_primary_index(ctx, query_args)
+@router.get("/cluster-input")
+async def cluster_input(
+    search: Optional[str] = Query(None),
+    type: Optional[str] = Query(None),
+    user_id: Optional[str] = Query(None),
+    time_range: Optional[str] = Query(None),
+    max: int = Query(500, ge=1, le=2000),
+    ctx: SessionContext = Depends(get_session),
+):
+    # Lightweight id + primary-text projection for every memory matching the
+    # current filter, so "Auto Group" clusters the whole (typically per-user)
+    # set instead of just the visible page.
+    _ensure_ready(ctx.manager)
+    if time_range is not None and time_range not in _VALID_TIME_RANGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid time_range '{time_range}'. Must be one of: hour, day, week.",
+        )
+    return await _run_with_index_heal(
+        ctx, ctx.manager.query_text_for_clustering, search, type, user_id, time_range, max
+    )
+
+
+@router.post("/by-ids")
+async def docs_by_ids(req: DocsByIdsRequest, ctx: SessionContext = Depends(get_session)):
+    # Fetch full documents for one page's worth of keys — used to browse an AI
+    # group whose membership can span more memories than a single browse page.
+    _ensure_ready(ctx.manager)
+    return await _run_with_index_heal(ctx, ctx.manager.query_documents_by_ids, req.ids)
 
 
 @router.get("/groups")

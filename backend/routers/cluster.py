@@ -17,7 +17,9 @@ async def cluster_proxy(req: ClusterProxyRequest):
     url = req.endpoint.rstrip("/") + "/v1/chat/completions"
     payload = {
         "messages": [{"role": "user", "content": req.prompt}],
-        "max_tokens": 1024,
+        # Large enough that clustering hundreds of memories doesn't truncate the
+        # JSON of theme → id assignments the model has to return.
+        "max_tokens": 4096,
         "stream": False,
     }
     if req.model:

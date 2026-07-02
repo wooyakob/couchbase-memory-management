@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { api } from '../api'
 
 // ─── DESIGN TOKENS ───────────────────────────────────────────────────────────
@@ -130,19 +130,19 @@ function Sidebar({ total, filtered, groups, themes, activeFilter, timeRange, onF
   const NavBtn = ({ id, label, count, color }) => {
     const active = activeFilter?.key === id || (!activeFilter && id === '__all__')
     return (
-      <button onClick={() => onFilter(id === '__all__' ? null : { key: id, label })} style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      <button onClick={() => onFilter(id === '__all__' ? null : { key: id, label })} title={label} style={{
+        display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px',
         width: '100%', padding: '6px 14px', border: 'none', textAlign: 'left',
         borderLeft: `2px solid ${active ? C.cbRed : 'transparent'}`,
         background: active ? 'rgba(234,35,40,0.08)' : 'transparent',
         color: active ? C.text : C.muted, fontSize: '12.5px', cursor: 'pointer',
         transition: 'all 0.12s',
       }}>
-        <span style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden' }}>
-          {color && <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: color, flexShrink: 0 }} />}
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+        <span style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', minWidth: 0, flex: 1 }}>
+          {color && <span style={{ width: '7px', height: '7px', borderRadius: '50%', background: color, flexShrink: 0, marginTop: '5px' }} />}
+          <span style={{ minWidth: 0, overflowWrap: 'anywhere', wordBreak: 'break-word', lineHeight: 1.35 }}>{label}</span>
         </span>
-        <span style={{ fontFamily: mono, fontSize: '10px', background: C.elevated, padding: '1px 6px', borderRadius: '8px', flexShrink: 0 }}>
+        <span style={{ fontFamily: mono, fontSize: '10px', background: C.elevated, padding: '1px 6px', borderRadius: '8px', flexShrink: 0, marginTop: '1px' }}>
           {count}
         </span>
       </button>
@@ -549,7 +549,7 @@ async function callClusterAPI(provider, apiKey, prompt, endpoint, model) {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 4096, messages: [{ role: 'user', content: prompt }] }),
     })
     const data = await res.json()
     if (!res.ok) throw new Error(data.error?.message || 'Anthropic API error')
@@ -559,7 +559,7 @@ async function callClusterAPI(provider, apiKey, prompt, endpoint, model) {
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-      body: JSON.stringify({ model: 'gpt-4o-mini', max_tokens: 1024, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({ model: 'gpt-4o-mini', max_tokens: 4096, messages: [{ role: 'user', content: prompt }] }),
     })
     const data = await res.json()
     if (!res.ok) throw new Error(data.error?.message || 'OpenAI API error')
@@ -578,7 +578,7 @@ async function callClusterAPI(provider, apiKey, prompt, endpoint, model) {
   throw new Error('Unknown provider')
 }
 
-function ClusterModal({ docs, onClose, onApply }) {
+function ClusterModal({ filterParams, onClose, onApply }) {
   const [provider, setProvider] = useState('capella')
   const [apiKey, setApiKey] = useState('')
   const [endpoint, setEndpoint] = useState('')
@@ -593,10 +593,16 @@ function ClusterModal({ docs, onClose, onApply }) {
     setBusy(true)
     setError('')
     try {
+      // Group ALL memories in the current view (typically one user), not just
+      // the page on screen — fetch a lightweight id + text projection for the
+      // whole filtered set (capped server-side, most-recent-first).
+      const input = await api.getClusterInput(filterParams)
+      const source = input.documents || []
       // Use numeric indices as IDs — models reliably reproduce small integers,
-      // unlike long UUIDs which get mangled. Map back to __cb_key after.
-      const eligible = docs.filter(m => getPrimaryText(m))
-      const indexToKey = eligible.map(m => m.__cb_key)
+      // unlike long UUIDs which get mangled. Map back to the real key after.
+      const eligible = source.filter(m => getPrimaryText(m))
+      if (!eligible.length) throw new Error('No memories with text to group in the current view.')
+      const indexToKey = eligible.map(m => m.id)
       const payload = eligible.map((m, i) => ({ id: String(i), text: getPrimaryText(m) }))
       const raw = await callClusterAPI(provider, apiKey, CLUSTER_PROMPT(payload), endpoint, modelName)
       const match = raw.match(/\{[\s\S]*\}/)
@@ -607,7 +613,7 @@ function ClusterModal({ docs, onClose, onApply }) {
       Object.entries(parsed.themes || {}).forEach(([theme, ids]) => {
         resolved[theme] = ids.map(id => indexToKey[Number(id)]).filter(Boolean)
       })
-      onApply(resolved)
+      onApply(resolved, { total: input.total, considered: eligible.length, truncated: input.truncated })
       onClose()
     } catch (e) {
       setError(e.message)
@@ -621,7 +627,8 @@ function ClusterModal({ docs, onClose, onApply }) {
       <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: '14px', width: '100%', maxWidth: '480px', padding: '24px', boxShadow: '0 16px 48px rgba(0,0,0,.6)' }}>
         <div style={{ fontSize: '16px', fontWeight: 600, color: C.text, marginBottom: '6px', fontFamily: display }}>Auto Group Memories</div>
         <p style={{ fontSize: '13px', color: C.muted, marginBottom: '18px', lineHeight: 1.6 }}>
-          Groups your memories into themes using an LLM. Your API key is used directly from the browser and never stored.
+          Groups all memories in the current view (up to 500 most recent) into themes using an LLM.
+          Your API key is used directly from the browser and never stored.
         </p>
 
         {/* Provider tabs */}
@@ -766,6 +773,19 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
     setLoading(true)
     setNoIndex(false)
     try {
+      if (activeFilter?.key?.startsWith('theme:')) {
+        // AI groups can span more memories than one browse page, so page
+        // through the group's member ids and fetch just this page's full
+        // documents by key rather than re-querying the whole collection.
+        const name = activeFilter.key.slice(6)
+        const ids = themes[name] || []
+        const pageIds = ids.slice(offset, offset + LIMIT)
+        const res = pageIds.length ? await api.getDocumentsByIds(pageIds) : { documents: [] }
+        const byKey = new Map((res.documents || []).map(d => [d.__cb_key, d]))
+        setDocs(pageIds.map(id => byKey.get(id)).filter(Boolean))
+        setTotal(ids.length)
+        return
+      }
       const params = queryParams()
       const res = await api.listMemories(params)
       setDocs(res.documents || [])
@@ -788,7 +808,7 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
     } finally {
       setLoading(false)
     }
-  }, [queryParams])
+  }, [queryParams, activeFilter, themes, offset])
 
   useEffect(() => { fetchDocs() }, [fetchDocs])
 
@@ -843,25 +863,40 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
     }
   }
 
-  const handleApplyThemes = (newThemes) => {
+  const handleApplyThemes = (newThemes, meta) => {
     setThemes(newThemes)
-    const idToTheme = {}
-    Object.entries(newThemes).forEach(([name, ids]) => ids.forEach(id => { idToTheme[id] = name }))
-    setDocs(prev => prev.map(d => ({ ...d, __theme: idToTheme[d.__cb_key] || d.__theme })))
-    showToast(`Grouped into ${Object.keys(newThemes).length} themes`)
+    // Land on a clean "all memories" view — the new groups are in the sidebar,
+    // and any previously-selected group name may no longer exist.
+    setActiveFilter(null)
+    setOffset(0)
+    const n = Object.keys(newThemes).length
+    const note = meta?.truncated ? ` — grouped ${meta.considered} most recent of ${meta.total}` : ''
+    showToast(`Grouped into ${n} theme${n !== 1 ? 's' : ''}${note}`)
   }
+
+  // Reverse index: which group each memory belongs to, spanning every page.
+  const idToTheme = useMemo(() => {
+    const m = {}
+    Object.entries(themes).forEach(([name, ids]) => ids.forEach(id => { m[id] = name }))
+    return m
+  }, [themes])
 
   const selectedDoc = selectedId ? docs.find(d => d.__cb_key === selectedId) : null
 
-  const visibleDocs = (() => {
-    if (!activeFilter) return docs
-    if (activeFilter.key?.startsWith('theme:')) {
-      const name = activeFilter.key.slice(6)
-      const ids = new Set(themes[name] || [])
-      return docs.filter(d => ids.has(d.__cb_key))
-    }
-    return docs
-  })()
+  // Server (or by-ids for a group) already returns exactly the page to show.
+  const visibleDocs = docs
+
+  // Filters that scope Auto Group to the current view (e.g. one user), so
+  // grouping runs over that whole set rather than the visible page. A group
+  // filter isn't a server-side filter, so it's excluded here.
+  const clusterParams = () => {
+    const p = {}
+    if (searchVal) p.search = searchVal
+    if (timeRange) p.time_range = timeRange
+    if (activeFilter?.key?.startsWith('type:')) p.type = activeFilter.key.slice(5)
+    if (activeFilter?.key?.startsWith('user:')) p.user_id = activeFilter.key.slice(5)
+    return p
+  }
 
   const isCapella = connection_string?.startsWith('couchbases://')
 
@@ -965,7 +1000,7 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
             <>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(310px, 1fr))', gap: '10px' }}>
                 {visibleDocs.map(doc => {
-                  const themeKey = doc.__theme
+                  const themeKey = idToTheme[doc.__cb_key]
                   const themeIdx = themeKey ? Object.keys(themes).indexOf(themeKey) : -1
                   const themeColor = themeIdx >= 0 ? THEME_COLORS[themeIdx % THEME_COLORS.length] : null
                   return (
@@ -1021,7 +1056,7 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
 
       {showCluster && (
         <ClusterModal
-          docs={docs}
+          filterParams={clusterParams()}
           onClose={() => setShowCluster(false)}
           onApply={handleApplyThemes}
         />

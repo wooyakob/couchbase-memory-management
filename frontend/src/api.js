@@ -29,6 +29,16 @@ export const api = {
     qs.set('offset', offset)
     return req('GET', `/memories?${qs}`)
   },
+  getClusterInput: ({ search, type, user_id, time_range, max = 500 } = {}) => {
+    const qs = new URLSearchParams()
+    if (search) qs.set('search', search)
+    if (type) qs.set('type', type)
+    if (user_id) qs.set('user_id', user_id)
+    if (time_range) qs.set('time_range', time_range)
+    qs.set('max', max)
+    return req('GET', `/memories/cluster-input?${qs}`)
+  },
+  getDocumentsByIds: (ids) => req('POST', '/memories/by-ids', { ids }),
   getGroups: () => req('GET', '/memories/groups'),
   updateMemory: (docId, data) => req('PUT', `/memories/${encodeURIComponent(docId)}`, { data }),
   deleteMemory: (docId) => req('DELETE', `/memories/${encodeURIComponent(docId)}`),

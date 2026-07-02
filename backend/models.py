@@ -20,3 +20,7 @@ class UpdateDocumentRequest(BaseModel):
 
 class BulkDeleteRequest(BaseModel):
     doc_ids: List[str]
+
+
+class DocsByIdsRequest(BaseModel):
+    ids: List[str]

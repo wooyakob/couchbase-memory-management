@@ -96,23 +96,21 @@ class ConnectionManager:
         b, s, c = self._bucket_name, self._scope_name, self._collection_name
         return f"`{b}`.`{s}`.`{c}`"
 
-    def query_documents(
+    def _build_where(
         self,
-        search: Optional[str] = None,
-        type_filter: Optional[str] = None,
-        user_filter: Optional[str] = None,
-        time_range: Optional[str] = None,
-        limit: int = 50,
-        offset: int = 0,
-    ) -> Dict[str, Any]:
+        params: Dict[str, Any],
+        search: Optional[str],
+        type_filter: Optional[str],
+        user_filter: Optional[str],
+        time_range: Optional[str],
+    ) -> str:
+        # Builds the WHERE clause shared by browsing, clustering-input, and any
+        # other filtered read. Mutates `params` in place with the named
+        # parameters each condition references. The non-search filters (user,
+        # type, time) always apply and also scope the text LIKE search — but
+        # they must NOT block an explicit block ID / document key lookup.
         from datetime import datetime, timedelta, timezone
 
-        path = self._col_path()
-        params: Dict[str, Any] = {"lim": limit, "off": offset}
-
-        # Build the non-search filters (user, type, time). These always apply
-        # to regular browsing, and also scope the text LIKE search — but they
-        # must NOT block an explicit block ID / document key lookup.
         scoped_conditions: List[str] = []
 
         if type_filter:
@@ -142,15 +140,27 @@ class ConnectionManager:
                 like_clause = f"(LOWER(TO_STRING(m)) LIKE $search_like AND {scoped_clause})"
             else:
                 like_clause = "LOWER(TO_STRING(m)) LIKE $search_like"
-            where = f"WHERE {exact_clause} OR {like_clause}"
-        elif scoped_conditions:
-            where = f"WHERE {' AND '.join(scoped_conditions)}"
-        else:
-            # Always-true predicate on the document key so the planner has a
-            # sargable clause to match against idx_mm_docid — a bare query with
-            # no WHERE at all won't pick up any secondary index and falls back
-            # to requiring a primary index.
-            where = "WHERE META(m).id IS NOT MISSING"
+            return f"WHERE {exact_clause} OR {like_clause}"
+        if scoped_conditions:
+            return f"WHERE {' AND '.join(scoped_conditions)}"
+        # Always-true predicate on the document key so the planner has a
+        # sargable clause to match against idx_mm_docid — a bare query with
+        # no WHERE at all won't pick up any secondary index and falls back
+        # to requiring a primary index.
+        return "WHERE META(m).id IS NOT MISSING"
+
+    def query_documents(
+        self,
+        search: Optional[str] = None,
+        type_filter: Optional[str] = None,
+        user_filter: Optional[str] = None,
+        time_range: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        path = self._col_path()
+        params: Dict[str, Any] = {"lim": limit, "off": offset}
+        where = self._build_where(params, search, type_filter, user_filter, time_range)
 
         count_q = f"SELECT COUNT(*) AS total FROM {path} AS m {where}"
         count_rows = list(self._cluster.query(count_q, QueryOptions(named_parameters=params)))
@@ -170,6 +180,63 @@ class ConnectionManager:
         docs = list(self._cluster.query(data_q, QueryOptions(named_parameters=params)))
 
         return {"documents": docs, "total": total, "offset": offset, "limit": limit}
+
+    def query_text_for_clustering(
+        self,
+        search: Optional[str] = None,
+        type_filter: Optional[str] = None,
+        user_filter: Optional[str] = None,
+        time_range: Optional[str] = None,
+        max_docs: int = 500,
+    ) -> Dict[str, Any]:
+        # Returns a lightweight id + primary-text projection for EVERY memory
+        # matching the current filter (typically a single user), not just the
+        # page the dashboard is showing — this is what "Auto Group" clusters
+        # over. Only the fields getPrimaryText() looks at are projected, so
+        # embeddings and other bulky fields never leave Couchbase. Capped at
+        # max_docs (ordered most-recent-first) so a user with a very large
+        # memory set stays within what one LLM call can reliably cluster; the
+        # `truncated` flag lets the UI say so rather than silently drop memories.
+        path = self._col_path()
+        params: Dict[str, Any] = {"lim": max_docs}
+        where = self._build_where(params, search, type_filter, user_filter, time_range)
+
+        count_q = f"SELECT COUNT(*) AS total FROM {path} AS m {where}"
+        count_rows = list(self._cluster.query(count_q, QueryOptions(named_parameters=params)))
+        total = count_rows[0]["total"] if count_rows else 0
+
+        data_q = f"""
+            SELECT META(m).id AS id,
+                   m.summary, m.content, m.fact, m.text, m.message
+            FROM {path} AS m
+            {where}
+            ORDER BY m.created_at DESC
+            LIMIT $lim
+        """
+        docs = list(self._cluster.query(data_q, QueryOptions(named_parameters=params)))
+        return {"documents": docs, "total": total, "truncated": total > len(docs), "max": max_docs}
+
+    def query_documents_by_ids(self, ids: List[str]) -> Dict[str, Any]:
+        # Fetches full documents for an explicit set of keys — used to page
+        # through a saved/AI group whose membership spans more memories than
+        # one browse page. Callers pass one page's worth of ids at a time, so
+        # the IN list stays small and idx_mm_docid (META().id) satisfies it.
+        if not ids:
+            return {"documents": []}
+        path = self._col_path()
+        params = {"ids": ids}
+        data_q = f"""
+            SELECT META(m).id AS __cb_key,
+                   META(m).cas AS __cb_cas,
+                   META(m).expiration AS __cb_expiry,
+                   META(m).type AS __cb_doc_type,
+                   m.*
+            FROM {path} AS m
+            WHERE META(m).id IN $ids
+            ORDER BY META(m).id
+        """
+        docs = list(self._cluster.query(data_q, QueryOptions(named_parameters=params)))
+        return {"documents": docs}
 
     def get_groups(self) -> Dict[str, Any]:
         path = self._col_path()
