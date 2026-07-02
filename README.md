@@ -50,7 +50,7 @@ cd frontend && npm install
 
 ```bash
 # Pull and run from Docker Hub
-docker run -p 8000:8000 wooyakob/memory-manager:v1.2.0
+docker run -p 8000:8000 wooyakob/memory-manager:latest
 
 # Or build and run locally
 docker compose up --build
