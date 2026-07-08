@@ -627,7 +627,11 @@ function ClusterModal({ filterParams, onClose, onApply }) {
       <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: '14px', width: '100%', maxWidth: '480px', padding: '24px', boxShadow: '0 16px 48px rgba(0,0,0,.6)' }}>
         <div style={{ fontSize: '16px', fontWeight: 600, color: C.text, marginBottom: '6px', fontFamily: display }}>Auto Group Memories</div>
         <p style={{ fontSize: '13px', color: C.muted, marginBottom: '18px', lineHeight: 1.6 }}>
-          Groups all memories in the current view (up to 500 most recent) into themes using an LLM.
+          Groups {filterParams?.user_id
+            ? <>the memories for user <strong style={{ color: C.text }}>{filterParams.user_id}</strong></>
+            : filterParams?.type
+              ? <>the memories of type <strong style={{ color: C.text }}>{filterParams.type}</strong></>
+              : 'all memories in the current view'} (up to 500 most recent) into themes using an LLM.
           Your API key is used directly from the browser and never stored.
         </p>
 
@@ -832,6 +836,10 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
   }
 
   const handleFilter = (filter) => {
+    // AI groups are computed for one specific scope (e.g. a single user), so
+    // they're stale and misleading once you switch to a different user/type/all
+    // scope — clear them. Navigating INTO a theme must keep them, though.
+    if (!filter?.key?.startsWith('theme:')) setThemes({})
     setActiveFilter(filter)
     setOffset(0)
     setSelectedId(null)
@@ -839,12 +847,14 @@ export default function MemoryDashboard({ connection, onDisconnect }) {
 
   const handleSearch = (val) => {
     setSearchVal(val)
+    setThemes({})
     setOffset(0)
     setSelectedId(null)
   }
 
   const handleTimeRange = (val) => {
     setTimeRange(val)
+    setThemes({})
     setOffset(0)
     setSelectedId(null)
   }
