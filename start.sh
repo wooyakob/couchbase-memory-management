@@ -7,15 +7,15 @@ echo ""
 
 # Backend
 cd "$ROOT/backend"
-"$ROOT/backend/venv/bin/uvicorn" main:app --reload --host 0.0.0.0 --port 8000 &
+"$ROOT/backend/venv/bin/uvicorn" main:app --reload --host 0.0.0.0 --port 8010 &
 BACKEND_PID=$!
-echo "Backend → http://localhost:8000"
+echo "Backend → http://localhost:8010"
 
 # Frontend
 cd "$ROOT/frontend"
 npm run dev &
 FRONTEND_PID=$!
-echo "Frontend → http://localhost:5173"
+echo "Frontend → http://localhost:5183"
 echo ""
 echo "Press Ctrl+C to stop both servers."
 

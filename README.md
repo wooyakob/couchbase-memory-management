@@ -23,14 +23,14 @@ This is a **read, organise and delete management layer** — it does not write o
 ```
 
 Opens:
-- Backend API — http://localhost:8000
-- Frontend — http://localhost:5173
+- Backend API — http://localhost:8010
+- Frontend — http://localhost:5183
 
 ### Manual start
 
 ```bash
 # Backend
-cd backend && ../backend/venv/bin/uvicorn main:app --reload --port 8000
+cd backend && ../backend/venv/bin/uvicorn main:app --reload --port 8010
 
 # Frontend (separate terminal)
 cd frontend && npm run dev
@@ -50,13 +50,13 @@ cd frontend && npm install
 
 ```bash
 # Pull and run from Docker Hub
-docker run -p 8000:8000 wooyakob/memory-manager:latest
+docker run -p 8010:8000 wooyakob/memory-manager:latest
 
 # Or build and run locally
 docker compose up --build
 ```
 
-Opens at http://localhost:8000 — the backend serves the built frontend.
+Opens at http://localhost:8010 — the backend serves the built frontend.
 
 ---
 
@@ -123,7 +123,7 @@ JSON structures for memories are displayed. Embedding fields are detected and ex
 ## Architecture
 
 ```
-backend/          Python FastAPI, port 8000
+backend/          Python FastAPI, port 8010
   main.py         App + CORS + static SPA serving
   db.py           ConnectionManager — Couchbase SDK 4.x, N1QL + META() queries
   models.py       Pydantic request models
@@ -136,7 +136,7 @@ backend/          Python FastAPI, port 8000
     test_memories.py     List, groups, delete, bulk delete
     test_errors.py       Error variants, state isolation, retry after failure
 
-frontend/         React 18 + Vite 5, port 5173
+frontend/         React 18 + Vite 5, port 5183
   src/
     api.js        Fetch wrapper for all /api/* calls
     App.jsx       Root — ConnectionScreen vs MemoryDashboard
@@ -145,7 +145,7 @@ frontend/         React 18 + Vite 5, port 5173
       MemoryDashboard.jsx    Dashboard: sidebar, cards, tabbed detail panel
 ```
 
-Vite proxies `/api/*` → `localhost:8000` in development. In production (and Docker), FastAPI serves the built frontend from `frontend/dist/`.
+Vite proxies `/api/*` → `localhost:8010` in development. In production (and Docker), FastAPI serves the built frontend from `frontend/dist/`.
 
 ---
 
